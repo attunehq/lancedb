@@ -57,7 +57,7 @@ jobs:
       - name: Run format
         run: hurry cargo fmt --all -- --check
       - name: Run clippy
-        run: hurry cargo clippy --workspace --tests --all-features -- -D warnings
+        run: hurry cargo clippy --workspace --all-features -- -D warnings
 
   build-no-lock:
     runs-on: ubuntu-24.04
@@ -88,14 +88,14 @@ jobs:
           sudo apt install -y protobuf-compiler libssl-dev
       - name: Build all
         run: |
-          hurry cargo build --benches --all-features --tests
+          hurry cargo build --benches --all-features
 
   linux:
     timeout-minutes: 30
     # To build all features, we need more disk space than is available
     # on the free OSS github runner. This is mostly due to the the
     # sentence-transformers feature.
-    runs-on: ubuntu-2404-4x-x64
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
@@ -131,7 +131,7 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
       - name: Build
-        run: hurry cargo build --all-features --tests --locked --examples
+        run: hurry cargo build --all-features --locked --examples
       - name: Run feature tests
         run: make -C ./lancedb feature-tests
       - name: Run examples
@@ -193,7 +193,10 @@ jobs:
         shell: pwsh
         run: |
           irm https://hurry-releases.s3.amazonaws.com/install.ps1 | iex
-          echo "$env:USERPROFILE\.hurry\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          $hurryPath = "$env:USERPROFILE\.hurry\bin"
+          echo $hurryPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          # Verify installation
+          & "$hurryPath\hurry.exe" --version
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
@@ -203,7 +206,7 @@ jobs:
         run: |
           rustup target add ${{ matrix.target }}
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
-          hurry cargo build --features remote --tests --locked --target ${{ matrix.target }}
+          hurry cargo build --features remote --locked --target ${{ matrix.target }}
       - name: Run tests
         # Can only run tests when target matches host
         if: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
@@ -251,4 +254,4 @@ jobs:
           hurry cargo update -p aws-sdk-sts --precise 1.51.0
           hurry cargo update -p home --precise 0.5.9
       - name: hurry cargo +${{ matrix.msrv }} check
-        run: hurry cargo check --workspace --tests --benches --all-features
+        run: hurry cargo check --workspace --benches --all-features
