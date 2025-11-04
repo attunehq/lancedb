@@ -1,0 +1,254 @@
+name: Rust (Hurry)
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    paths:
+      - Cargo.toml
+      - rust/**
+      - .github/workflows/rust-hurry.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  # This env var is used by Swatinem/rust-cache@v2 for the cache
+  # key, so we set it to make sure it is always consistent.
+  CARGO_TERM_COLOR: always
+  # Disable full debug symbol generation to speed up CI build and keep memory down
+  # "1" means line tables only, which is useful for panic tracebacks.
+  RUSTFLAGS: "-C debuginfo=1"
+  RUST_BACKTRACE: "1"
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lint:
+    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Need up-to-date compilers for kernels
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt, clippy
+      - name: Install hurry
+        run: |
+          curl -sSfL https://hurry-releases.s3.amazonaws.com/install.sh | bash
+          echo "$HOME/.hurry/bin" >> $GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y protobuf-compiler libssl-dev
+      - name: Run format
+        run: hurry cargo fmt --all -- --check
+      - name: Run clippy
+        run: hurry cargo clippy --workspace --tests --all-features -- -D warnings
+
+  build-no-lock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # Need up-to-date compilers for kernels
+      CC: clang
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      # Building without a lock file often requires the latest Rust version since downstream
+      # dependencies may have updated their minimum Rust version.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: "stable"
+      - name: Install hurry
+        run: |
+          curl -sSfL https://hurry-releases.s3.amazonaws.com/install.sh | bash
+          echo "$HOME/.hurry/bin" >> $GITHUB_PATH
+      # Remove cargo.lock to force a fresh build
+      - name: Remove Cargo.lock
+        run: rm -f Cargo.lock
+      - uses: rui314/setup-mold@v1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y protobuf-compiler libssl-dev
+      - name: Build all
+        run: |
+          hurry cargo build --benches --all-features --tests
+
+  linux:
+    timeout-minutes: 30
+    # To build all features, we need more disk space than is available
+    # on the free OSS github runner. This is mostly due to the the
+    # sentence-transformers feature.
+    runs-on: ubuntu-2404-4x-x64
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+    env:
+      # Need up-to-date compilers for kernels
+      CC: clang-18
+      CXX: clang++-18
+      GH_TOKEN: ${{ secrets.SOPHON_READ_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - name: Install hurry
+        run: |
+          curl -sSfL https://hurry-releases.s3.amazonaws.com/install.sh | bash
+          echo "$HOME/.hurry/bin" >> $GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install dependencies
+        run: |
+          # This shaves 2 minutes off this step in CI. This doesn't seem to be
+          # necessary in standard runners, but it is in the 4x runners.
+          sudo rm /var/lib/man-db/auto-update
+          sudo apt install -y protobuf-compiler libssl-dev
+      - uses: rui314/setup-mold@v1
+      - name: Make Swap
+        run: |
+          sudo fallocate -l 16G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+      - name: Build
+        run: hurry cargo build --all-features --tests --locked --examples
+      - name: Run feature tests
+        run: make -C ./lancedb feature-tests
+      - name: Run examples
+        run: hurry cargo run --example simple --locked
+      - name: Run remote tests
+        # Running this requires access to secrets, so skip if this is
+        # a PR from a fork.
+        if: github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork
+        run: make -C ./lancedb remote-tests
+
+  macos:
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        mac-runner: ["macos-13", "macos-14"]
+    runs-on: "${{ matrix.mac-runner }}"
+    defaults:
+      run:
+        shell: bash
+        working-directory: rust
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          lfs: true
+      - name: CPU features
+        run: sysctl -a | grep cpu
+      - name: Install hurry
+        run: |
+          curl -sSfL https://hurry-releases.s3.amazonaws.com/install.sh | bash
+          echo "$HOME/.hurry/bin" >> $GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install dependencies
+        run: brew install protobuf
+      - name: Run tests
+        run: |
+          # Don't run the s3 integration tests since docker isn't available
+          # on this image.
+          ALL_FEATURES=`hurry cargo metadata --format-version=1 --no-deps \
+            | jq -r '.packages[] | .features | keys | .[]' \
+            | grep -v s3-test | sort | uniq | paste -s -d "," -`
+          hurry cargo test --features $ALL_FEATURES --locked
+
+  windows:
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        target:
+          - x86_64-pc-windows-msvc
+          - aarch64-pc-windows-msvc
+    defaults:
+      run:
+        working-directory: rust/lancedb
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install hurry
+        shell: pwsh
+        run: |
+          irm https://hurry-releases.s3.amazonaws.com/install.ps1 | iex
+          echo "$env:USERPROFILE\.hurry\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+      - name: Install Protoc v21.12
+        run: choco install --no-progress protoc
+      - name: Build
+        run: |
+          rustup target add ${{ matrix.target }}
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          hurry cargo build --features remote --tests --locked --target ${{ matrix.target }}
+      - name: Run tests
+        # Can only run tests when target matches host
+        if: ${{ matrix.target == 'x86_64-pc-windows-msvc' }}
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          hurry cargo test --features remote --locked
+
+  msrv:
+    # Check the minimum supported Rust version
+    name: MSRV Check - Rust v${{ matrix.msrv }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        msrv: ["1.78.0"] # This should match up with rust-version in Cargo.toml
+    env:
+      # Need up-to-date compilers for kernels
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y protobuf-compiler libssl-dev
+      - name: Install hurry
+        run: |
+          curl -sSfL https://hurry-releases.s3.amazonaws.com/install.sh | bash
+          echo "$HOME/.hurry/bin" >> $GITHUB_PATH
+      - name: Install ${{ matrix.msrv }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.msrv }}
+      - name: Downgrade  dependencies
+        # These packages have newer requirements for MSRV
+        run: |
+          hurry cargo update -p aws-sdk-bedrockruntime --precise 1.64.0
+          hurry cargo update -p aws-sdk-dynamodb --precise 1.55.0
+          hurry cargo update -p aws-config --precise 1.5.10
+          hurry cargo update -p aws-sdk-kms --precise 1.51.0
+          hurry cargo update -p aws-sdk-s3 --precise 1.65.0
+          hurry cargo update -p aws-sdk-sso --precise 1.50.0
+          hurry cargo update -p aws-sdk-ssooidc --precise 1.51.0
+          hurry cargo update -p aws-sdk-sts --precise 1.51.0
+          hurry cargo update -p home --precise 0.5.9
+      - name: hurry cargo +${{ matrix.msrv }} check
+        run: hurry cargo check --workspace --tests --benches --all-features
