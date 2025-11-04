@@ -131,7 +131,7 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
       - name: Build
-        run: hurry cargo build --all-features --locked --examples
+        run: hurry cargo build --all-features --locked
       - name: Run feature tests
         run: make -C ./lancedb feature-tests
       - name: Run examples
